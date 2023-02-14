@@ -176,7 +176,7 @@ class TestHtml(unittest.TestCase):
     self.assertEqual(c, 2)
   
   def test_html_each(self):
-    rows = db.execute("""select rowid, * 
+    rows = db.execute("""select rowid, html, text 
     from html_each('<div>
     <p>a</p>
     <p id=x>b</p>

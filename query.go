@@ -1,12 +1,15 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"io"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/augmentable-dev/vtab"
 	"go.riyazali.net/sqlite"
+	"golang.org/x/net/html"
 )
 
 /** html_text(document [, selector])
@@ -15,27 +18,27 @@ import (
  * @param document {text | html} - HTML document to read from.
  * @param selector {text} - CSS-style selector of which element in document to read.
  */
- type HtmlTextFunc struct{
+type HtmlTextFunc struct {
 	nArgs int
- }
+}
 
- func (*HtmlTextFunc) Deterministic() bool { return true }
- func (h *HtmlTextFunc) Args() int           { return h.nArgs }
- func (*HtmlTextFunc) Apply(c *sqlite.Context, values ...sqlite.Value) {
-	 html := values[0].Text()
-	 doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
- 
-	 if err != nil {
-		 c.ResultError(err)
-		 return
-	 }
-	 if len(values) > 1 {
+func (*HtmlTextFunc) Deterministic() bool { return true }
+func (h *HtmlTextFunc) Args() int         { return h.nArgs }
+func (*HtmlTextFunc) Apply(c *sqlite.Context, values ...sqlite.Value) {
+	html := values[0].Text()
+	doc, err := goquery.NewDocumentFromReader(strings.NewReader(html))
+
+	if err != nil {
+		c.ResultError(err)
+		return
+	}
+	if len(values) > 1 {
 		selector := values[1].Text()
 		c.ResultText(doc.FindMatcher(goquery.Single(selector)).Text())
-	 }else {
+	} else {
 		c.ResultText(doc.Text())
-	 } 
- }
+	}
+}
 
 /** html_extract(document, selector)
  * Returns the entire HTML representation of the selected element from document, using selector.
@@ -100,15 +103,21 @@ func (*HtmlCountFunc) Apply(c *sqlite.Context, values ...sqlite.Value) {
  * @param document {text | html} - HTML document to read from.
  * @param selector {text} - CSS-style selector of which element in document to read.
  */
- var HtmlEachColumns = []vtab.Column{
+var HtmlEachColumns = []vtab.Column{
 	{Name: "document", Type: sqlite.SQLITE_TEXT.String(), NotNull: true, Hidden: true, Filters: []*vtab.ColumnFilter{{Op: sqlite.INDEX_CONSTRAINT_EQ, Required: true, OmitCheck: true}}},
 	{Name: "selector", Type: sqlite.SQLITE_TEXT.String(), NotNull: true, Hidden: true, Filters: []*vtab.ColumnFilter{{Op: sqlite.INDEX_CONSTRAINT_EQ, Required: true, OmitCheck: true}}},
 
 	{Name: "html", Type: sqlite.SQLITE_TEXT.String()},
 	{Name: "text", Type: sqlite.SQLITE_TEXT.String()},
+	{Name: "tag", Type: sqlite.SQLITE_TEXT.String()},
+	{Name: "class", Type: sqlite.SQLITE_TEXT.String()},
+	{Name: "attrib", Type: sqlite.SQLITE_TEXT.String()},
+	{Name: "depth", Type: sqlite.SQLITE_INTEGER.String()},
+	{Name: "xpath", Type: sqlite.SQLITE_TEXT.String()},
+	{Name: "css", Type: sqlite.SQLITE_TEXT.String()},
 }
 
- type HtmlEachCursor struct {
+type HtmlEachCursor struct {
 	current int
 
 	document *goquery.Document
@@ -125,6 +134,7 @@ func (cur *HtmlEachCursor) Column(ctx *sqlite.Context, c int) error {
 		ctx.ResultText("")
 
 	case "html":
+
 		html, err := goquery.OuterHtml(cur.children.Eq(cur.current))
 		if err != nil {
 			ctx.ResultError(err)
@@ -134,6 +144,109 @@ func (cur *HtmlEachCursor) Column(ctx *sqlite.Context, c int) error {
 		}
 	case "text":
 		ctx.ResultText(cur.children.Eq(cur.current).Text())
+
+	case "tag":
+		ctx.ResultText(goquery.NodeName(cur.children.Eq(cur.current)))
+	case "class":
+		ctx.ResultText(cur.children.Eq(cur.current).AttrOr("class", ""))
+	case "attrib":
+		attribMap := make(map[string][]string)
+		for _, attrib := range cur.children.Eq(cur.current).Nodes[0].Attr {
+			attribValueList, ok := attribMap[attrib.Key]
+			if !ok {
+				attribValueList = make([]string, 0)
+			}
+			attribMap[attrib.Key] = append(attribValueList, strings.Trim(attrib.Val, " "))
+		}
+		text, err := json.Marshal(attribMap)
+		if err != nil {
+			ctx.ResultError(err)
+		} else {
+			ctx.ResultText(string(text))
+		}
+	case "depth":
+		stop := 100
+		currentNode := cur.children.Eq(cur.current).Nodes[0]
+		depth := 1
+		for stop > 0 && currentNode != nil && currentNode != currentNode.Parent {
+			stop -= 1
+			currentNode = currentNode.Parent
+			depth += 1
+		}
+		ctx.ResultInt(depth)
+
+	case "xpath":
+		stop := 100
+		currentNode := cur.children.Eq(cur.current).Nodes[0]
+		valueList := make([]string, 0)
+		for stop > 0 && currentNode != nil && currentNode != currentNode.Parent && currentNode.Parent != nil {
+			stop -= 1
+			currentSelector := &goquery.Selection{Nodes: make([]*html.Node, 0)}
+			currentSelector.Nodes = append(currentSelector.Nodes, currentNode)
+
+			//div[@class="Test"]
+			tag := goquery.NodeName(currentSelector)
+			nodeId := currentSelector.AttrOr("id", "")
+			className := currentSelector.AttrOr("class", "")
+
+			if nodeId != "" {
+				tag = fmt.Sprintf("%s[@id=\"%s\"]", tag, nodeId)
+			} else if className != "" {
+				classSegments := make([]string, 0)
+				for _, classSegment := range strings.Split(className, " ") {
+					classSegment = strings.Trim(classSegment, " .")
+					if classSegment != "" {
+						classSegments = append(classSegments, fmt.Sprintf("@class=\"%s\"", classSegment))
+					}
+				}
+				tag = fmt.Sprintf("%s[%s]", tag, strings.Join(classSegments, " and "))
+			}
+			valueList = append(valueList, tag)
+			currentNode = currentNode.Parent
+			if className != "" || nodeId != "" {
+				break
+			}
+		}
+		for i, j := 0, len(valueList)-1; i < j; i, j = i+1, j-1 {
+			valueList[i], valueList[j] = valueList[j], valueList[i]
+		}
+		ctx.ResultText(strings.Join(valueList, "/"))
+
+	case "css":
+		stop := 100
+		currentNode := cur.children.Eq(cur.current).Nodes[0]
+		valueList := make([]string, 0)
+		for stop > 0 && currentNode != nil && currentNode != currentNode.Parent && currentNode.Parent != nil {
+			stop -= 1
+			currentSelector := &goquery.Selection{Nodes: make([]*html.Node, 0)}
+			currentSelector.Nodes = append(currentSelector.Nodes, currentNode)
+			tag := goquery.NodeName(currentSelector)
+			nodeId := currentSelector.AttrOr("id", "")
+			className := currentSelector.AttrOr("class", "")
+
+			if nodeId != "" {
+				tag = "#" + nodeId
+			} else if className != "" {
+				classSegments := make([]string, 0)
+				for _, classSegment := range strings.Split(className, " ") {
+					classSegment = strings.Trim(classSegment, " .")
+					if classSegment != "" {
+						classSegments = append(classSegments, classSegment)
+					}
+				}
+				tag = tag + "." + strings.Join(classSegments, ".")
+			}
+			valueList = append(valueList, tag)
+			currentNode = currentNode.Parent
+			if className != "" || nodeId != "" {
+				break
+			}
+
+		}
+		for i, j := 0, len(valueList)-1; i < j; i, j = i+1, j-1 {
+			valueList[i], valueList[j] = valueList[j], valueList[i]
+		}
+		ctx.ResultText(strings.Join(valueList, ">"))
 	}
 	return nil
 }
