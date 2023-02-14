@@ -150,103 +150,15 @@ func (cur *HtmlEachCursor) Column(ctx *sqlite.Context, c int) error {
 	case "class":
 		ctx.ResultText(cur.children.Eq(cur.current).AttrOr("class", ""))
 	case "attrib":
-		attribMap := make(map[string][]string)
-		for _, attrib := range cur.children.Eq(cur.current).Nodes[0].Attr {
-			attribValueList, ok := attribMap[attrib.Key]
-			if !ok {
-				attribValueList = make([]string, 0)
-			}
-			attribMap[attrib.Key] = append(attribValueList, strings.Trim(attrib.Val, " "))
-		}
-		text, err := json.Marshal(attribMap)
-		if err != nil {
-			ctx.ResultError(err)
-		} else {
-			ctx.ResultText(string(text))
-		}
+		ctx.ResultText(cur.getAttrib())
 	case "depth":
-		stop := 100
-		currentNode := cur.children.Eq(cur.current).Nodes[0]
-		depth := 1
-		for stop > 0 && currentNode != nil && currentNode != currentNode.Parent {
-			stop -= 1
-			currentNode = currentNode.Parent
-			depth += 1
-		}
-		ctx.ResultInt(depth)
+		ctx.ResultInt(cur.getDepth())
 
 	case "xpath":
-		stop := 100
-		currentNode := cur.children.Eq(cur.current).Nodes[0]
-		valueList := make([]string, 0)
-		for stop > 0 && currentNode != nil && currentNode != currentNode.Parent && currentNode.Parent != nil {
-			stop -= 1
-			currentSelector := &goquery.Selection{Nodes: make([]*html.Node, 0)}
-			currentSelector.Nodes = append(currentSelector.Nodes, currentNode)
-
-			//div[@class="Test"]
-			tag := goquery.NodeName(currentSelector)
-			nodeId := currentSelector.AttrOr("id", "")
-			className := currentSelector.AttrOr("class", "")
-
-			if nodeId != "" {
-				tag = fmt.Sprintf("%s[@id=\"%s\"]", tag, nodeId)
-			} else if className != "" {
-				classSegments := make([]string, 0)
-				for _, classSegment := range strings.Split(className, " ") {
-					classSegment = strings.Trim(classSegment, " .")
-					if classSegment != "" {
-						classSegments = append(classSegments, fmt.Sprintf("@class=\"%s\"", classSegment))
-					}
-				}
-				tag = fmt.Sprintf("%s[%s]", tag, strings.Join(classSegments, " and "))
-			}
-			valueList = append(valueList, tag)
-			currentNode = currentNode.Parent
-			if className != "" || nodeId != "" {
-				break
-			}
-		}
-		for i, j := 0, len(valueList)-1; i < j; i, j = i+1, j-1 {
-			valueList[i], valueList[j] = valueList[j], valueList[i]
-		}
-		ctx.ResultText(strings.Join(valueList, "/"))
+		ctx.ResultText(cur.getXpath())
 
 	case "css":
-		stop := 100
-		currentNode := cur.children.Eq(cur.current).Nodes[0]
-		valueList := make([]string, 0)
-		for stop > 0 && currentNode != nil && currentNode != currentNode.Parent && currentNode.Parent != nil {
-			stop -= 1
-			currentSelector := &goquery.Selection{Nodes: make([]*html.Node, 0)}
-			currentSelector.Nodes = append(currentSelector.Nodes, currentNode)
-			tag := goquery.NodeName(currentSelector)
-			nodeId := currentSelector.AttrOr("id", "")
-			className := currentSelector.AttrOr("class", "")
-
-			if nodeId != "" {
-				tag = "#" + nodeId
-			} else if className != "" {
-				classSegments := make([]string, 0)
-				for _, classSegment := range strings.Split(className, " ") {
-					classSegment = strings.Trim(classSegment, " .")
-					if classSegment != "" {
-						classSegments = append(classSegments, classSegment)
-					}
-				}
-				tag = tag + "." + strings.Join(classSegments, ".")
-			}
-			valueList = append(valueList, tag)
-			currentNode = currentNode.Parent
-			if className != "" || nodeId != "" {
-				break
-			}
-
-		}
-		for i, j := 0, len(valueList)-1; i < j; i, j = i+1, j-1 {
-			valueList[i], valueList[j] = valueList[j], valueList[i]
-		}
-		ctx.ResultText(strings.Join(valueList, ">"))
+		ctx.ResultText(cur.getCss())
 	}
 	return nil
 }
@@ -307,4 +219,106 @@ func RegisterQuery(api *sqlite.ExtensionApi) error {
 		return err
 	}
 	return nil
+}
+
+func (cur *HtmlEachCursor) getAttrib() string {
+	attribMap := make(map[string][]string)
+	for _, attrib := range cur.children.Eq(cur.current).Nodes[0].Attr {
+		attribValueList, ok := attribMap[attrib.Key]
+		if !ok {
+			attribValueList = make([]string, 0)
+		}
+		attribMap[attrib.Key] = append(attribValueList, strings.Trim(attrib.Val, " "))
+	}
+	text, err := json.Marshal(attribMap)
+	if err != nil {
+		return ""
+	} else {
+		return string(text)
+	}
+}
+
+func (cur *HtmlEachCursor) getCss() string {
+	valueList := make([]string, 0)
+	for _, currentNode := range cur.traverseNodeTillRoot() {
+		currentSelector := &goquery.Selection{Nodes: make([]*html.Node, 0)}
+		currentSelector.Nodes = append(currentSelector.Nodes, currentNode)
+		tag := goquery.NodeName(currentSelector)
+		nodeId := currentSelector.AttrOr("id", "")
+		className := currentSelector.AttrOr("class", "")
+
+		if nodeId != "" {
+			tag = "#" + nodeId
+		} else if className != "" {
+			classSegments := make([]string, 0)
+			for _, classSegment := range strings.Split(className, " ") {
+				classSegment = strings.Trim(classSegment, " .")
+				if classSegment != "" {
+					classSegments = append(classSegments, classSegment)
+				}
+			}
+			tag = tag + "." + strings.Join(classSegments, ".")
+		}
+		valueList = append(valueList, tag)
+		if className != "" || nodeId != "" {
+			break
+		}
+
+	}
+	for i, j := 0, len(valueList)-1; i < j; i, j = i+1, j-1 {
+		valueList[i], valueList[j] = valueList[j], valueList[i]
+	}
+	return strings.Join(valueList, ">")
+}
+
+func (cur *HtmlEachCursor) getXpath() string {
+	valueList := make([]string, 0)
+	for _, currentNode := range cur.traverseNodeTillRoot() {
+		currentSelector := &goquery.Selection{Nodes: make([]*html.Node, 0)}
+		currentSelector.Nodes = append(currentSelector.Nodes, currentNode)
+		tag := goquery.NodeName(currentSelector)
+		nodeId := currentSelector.AttrOr("id", "")
+		className := currentSelector.AttrOr("class", "")
+
+		if nodeId != "" {
+			tag = fmt.Sprintf("%s[@id=\"%s\"]", tag, nodeId)
+		} else if className != "" {
+			classSegments := make([]string, 0)
+			for _, classSegment := range strings.Split(className, " ") {
+				classSegment = strings.Trim(classSegment, " .")
+				if classSegment != "" {
+					classSegments = append(classSegments, fmt.Sprintf("@class=\"%s\"", classSegment))
+				}
+			}
+			tag = fmt.Sprintf("%s[%s]", tag, strings.Join(classSegments, " and "))
+		}
+		valueList = append(valueList, tag)
+		if className != "" || nodeId != "" {
+			break
+		}
+	}
+	for i, j := 0, len(valueList)-1; i < j; i, j = i+1, j-1 {
+		valueList[i], valueList[j] = valueList[j], valueList[i]
+	}
+	return strings.Join(valueList, "/")
+}
+
+func (cur *HtmlEachCursor) getDepth() int {
+	depth := len(cur.traverseNodeTillRoot())
+	if depth == 0 {
+		return 1
+	}
+	return depth
+}
+
+func (cur *HtmlEachCursor) traverseNodeTillRoot() []*html.Node {
+	nodeList := make([]*html.Node, 0)
+	stop := 100
+	currentNode := cur.children.Eq(cur.current).Nodes[0]
+	for stop > 0 && currentNode != nil && currentNode.Parent != nil && currentNode != currentNode.Parent {
+		stop -= 1
+		nodeList = append(nodeList, currentNode)
+		currentNode = currentNode.Parent
+	}
+	return nodeList
 }
